@@ -32,8 +32,6 @@ func New(version string) func() provider.Provider {
 
 type CTFdProviderModel struct {
 	URL      types.String `tfsdk:"url"`
-	Session  types.String `tfsdk:"session"`
-	Nonce    types.String `tfsdk:"nonce"`
 	APIKey   types.String `tfsdk:"api_key"`
 	Username types.String `tfsdk:"username"`
 	Password types.String `tfsdk:"password"`
@@ -71,16 +69,6 @@ public version control system.
 				MarkdownDescription: "CTFd base URL (e.g. `https://my-ctf.lan`). Could use `CTFD_URL` environment variable instead.",
 				Optional:            true,
 			},
-			"session": schema.StringAttribute{
-				MarkdownDescription: "User session token, comes with nonce. Could use `CTFD_SESSION` environment variable instead.",
-				Sensitive:           true,
-				Optional:            true,
-			},
-			"nonce": schema.StringAttribute{
-				MarkdownDescription: "User session nonce, comes with session. Could use `CTFD_NONCE` environment variable instead.",
-				Sensitive:           true,
-				Optional:            true,
-			},
 			"api_key": schema.StringAttribute{
 				MarkdownDescription: "User API key. Could use `CTFD_API_KEY` environment variable instead. Despite being the most convenient way to authenticate yourself, we do not recommend it as you will probably generate a long-live token without any rotation policy.",
 				Sensitive:           true,
@@ -116,20 +104,6 @@ func (p *CTFdProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 			"The provider cannot guess where to reach the CTFd instance.",
 		)
 	}
-	if config.Session.IsUnknown() {
-		resp.Diagnostics.AddAttributeError(
-			path.Root("session"),
-			"Unknown CTFd session.",
-			"The provider cannot create the CTFd API client as there is an unknown session value.",
-		)
-	}
-	if config.Nonce.IsUnknown() {
-		resp.Diagnostics.AddAttributeError(
-			path.Root("nonce"),
-			"Unknown CTFd nonce.",
-			"The provider cannot create the CTFd API client as there is an unknown nonce value.",
-		)
-	}
 	if config.APIKey.IsUnknown() {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("api_key"),
@@ -158,20 +132,12 @@ func (p *CTFdProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 
 	// Extract environment variables values
 	url := os.Getenv("CTFD_URL")
-	session := os.Getenv("CTFD_SESSION")
-	nonce := os.Getenv("CTFD_NONCE")
 	apiKey := os.Getenv("CTFD_API_KEY")
 	username := os.Getenv("CTFD_ADMIN_USERNAME")
 	password := os.Getenv("CTFD_ADMIN_PASSWORD")
 
 	if !config.URL.IsNull() {
 		url = config.URL.ValueString()
-	}
-	if !config.Session.IsNull() {
-		session = config.Session.ValueString()
-	}
-	if !config.Nonce.IsNull() {
-		nonce = config.Nonce.ValueString()
 	}
 	if !config.APIKey.IsNull() {
 		apiKey = config.APIKey.ValueString()
@@ -184,10 +150,9 @@ func (p *CTFdProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	}
 
 	// Check there is enough content
-	sn := session != "" && nonce != ""
 	ak := apiKey != ""
 	up := username != "" && password != ""
-	if !sn && !ak && !up {
+	if !ak && !up {
 		resp.Diagnostics.AddAttributeError(
 			path.Empty(),
 			"Invalid provider configuration",
@@ -198,14 +163,21 @@ func (p *CTFdProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 
 	// Instantiate CTFd API client
 	ctx = tflog.SetField(ctx, "ctfd_url", url)
-	ctx = utils.AddSensitive(ctx, "ctfd_session", session)
-	ctx = utils.AddSensitive(ctx, "ctfd_nonce", nonce)
 	ctx = utils.AddSensitive(ctx, "ctfd_api_key", apiKey)
 	ctx = utils.AddSensitive(ctx, "ctfd_username", username)
 	ctx = utils.AddSensitive(ctx, "ctfd_password", password)
 	tflog.Debug(ctx, "Creating CTFd API client")
 
-	client := api.NewClient(url, session, nonce, apiKey)
+	nonce, session, err := api.GetNonceAndSession(url, api.WithContext(ctx))
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"CTFd error",
+			fmt.Sprintf("Failed to login: %s", err),
+		)
+		return
+	}
+
+	client := api.NewClient(url, nonce, session, apiKey)
 	if up {
 		if err := client.Login(&api.LoginParams{
 			Name:     username,
@@ -218,6 +190,7 @@ func (p *CTFdProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		}
 		return
 	}
+
 	resp.DataSourceData = client
 	resp.ResourceData = client
 
